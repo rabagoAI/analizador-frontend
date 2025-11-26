@@ -1,162 +1,185 @@
 import React, { useCallback, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { 
-  Paper, 
-  Typography, 
-  Button, 
-  Box,
-  Alert,
-  CircularProgress 
-} from '@mui/material';
-import { CloudUpload } from '@mui/icons-material';
-import * as XLSX from 'xlsx';
-import { analyzeFile } from '../services/api';
+import { Paper, Typography, Box, LinearProgress, Alert, Button } from '@mui/material';
+import { CloudUpload, Description } from '@mui/icons-material';
 
-const FileUpload = ({ onAnalysisComplete }) => {
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+const FileUpload = ({ onDataProcessed }) => {
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('');
 
-  const processFile = async (file) => {
-    setIsLoading(true);
-    setError('');
-    
+  const onDrop = useCallback(async (acceptedFiles) => {
+    if (acceptedFiles.length === 0) return;
+
+    const file = acceptedFiles[0];
+    setUploading(true);
+    setUploadProgress(0);
+    setUploadStatus('Procesando archivo...');
+
     try {
-      console.log('Procesando archivo:', file.name, file.type);
-      const data = await readFileContent(file);
-      console.log('Contenido leído, enviando al backend...');
-      const analysisResult = await analyzeFile(data, file.name);
-      onAnalysisComplete(analysisResult);
-    } catch (err) {
-      console.error('Error en processFile:', err);
-      setError(err.message || 'Error al procesar el archivo');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+      const progressInterval = setInterval(() => {
+        setUploadProgress(prev => {
+          if (prev >= 90) {
+            clearInterval(progressInterval);
+            return 90;
+          }
+          return prev + 10;
+        });
+      }, 200);
 
-  const readFileContent = (file) => {
-    return new Promise((resolve, reject) => {
       const reader = new FileReader();
       
       reader.onload = (e) => {
+        clearInterval(progressInterval);
+        setUploadProgress(100);
+        
         try {
-          const data = e.target.result;
-          console.log('Archivo leído, tipo:', file.type);
+          const content = e.target.result;
+          setUploadStatus('Procesando datos...');
           
-          if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-            // Para CSV, usar el texto directamente
-            resolve(data);
-          } else {
-            // Para Excel, convertir a CSV
-            const workbook = XLSX.read(data, { 
-              type: file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ? 'array' : 'binary' 
-            });
-            const firstSheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[firstSheetName];
-            const csvData = XLSX.utils.sheet_to_csv(worksheet);
-            console.log('Excel convertido a CSV, longitud:', csvData.length);
-            resolve(csvData);
+          const rows = content.split('\n').filter(row => row.trim() !== '');
+          
+          if (rows.length <= 1) {
+            setUploadStatus('Error: Archivo vacío o sin datos');
+            setUploading(false);
+            return;
           }
-        } catch (error) {
-          console.error('Error en onload:', error);
-          reject(new Error('Error al leer el contenido del archivo'));
+
+          const headers = rows[0].split(',').map(h => h.trim().toLowerCase());
+          const processedData = [];
+
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            const values = row.split(',').map(v => v.replace(/^"|"$/g, '').trim());
+            
+            if (values.length >= headers.length) {
+              const item = {};
+              let hasValidData = false;
+
+              headers.forEach((header, j) => {
+                let value = values[j] || '';
+                
+                if (header.includes('precio') || header.includes('costo')) {
+                  value = parseFloat(value) || 0;
+                  if (value > 0) hasValidData = true;
+                } else if (header.includes('cantidad')) {
+                  value = parseInt(value) || 1;
+                }
+                
+                item[header] = value;
+              });
+
+              if (hasValidData) {
+                processedData.push(item);
+              }
+            }
+          }
+
+          if (processedData.length === 0) {
+            setUploadStatus('Error: No se encontraron datos válidos');
+            setUploading(false);
+            return;
+          }
+
+          setUploadStatus(`Éxito: ${processedData.length} registros procesados`);
+          
+          setTimeout(() => {
+            onDataProcessed(processedData);
+            setUploading(false);
+            setUploadProgress(0);
+          }, 1000);
+
+        } catch (parseError) {
+          console.error('Error parsing file:', parseError);
+          setUploadStatus('Error: Formato de archivo no válido');
+          setUploading(false);
         }
       };
-      
-      reader.onerror = (error) => {
-        console.error('Error del FileReader:', error);
-        reject(new Error('Error al leer el archivo'));
-      };
-      
-      reader.onabort = () => {
-        reject(new Error('Lectura del archivo cancelada'));
+
+      reader.onerror = () => {
+        setUploadStatus('Error al leer el archivo');
+        setUploading(false);
       };
 
-      // Determinar cómo leer el archivo basado en su tipo
-      if (file.name.endsWith('.csv') || file.type === 'text/csv') {
-        reader.readAsText(file, 'UTF-8');
-      } else if (file.name.endsWith('.xlsx') || file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-        reader.readAsArrayBuffer(file);
-      } else {
-        // Para .xls y otros formatos
-        reader.readAsBinaryString(file);
-      }
-    });
-  };
+      reader.readAsText(file);
 
-  const onDrop = useCallback((acceptedFiles) => {
-    if (acceptedFiles.length > 0) {
-      processFile(acceptedFiles[0]);
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadStatus('Error en la carga del archivo');
+      setUploading(false);
     }
-  }, []);
+  }, [onDataProcessed]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'application/vnd.ms-excel': ['.xls'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'text/csv': ['.csv']
+      'text/csv': ['.csv'],
+      'application/vnd.ms-excel': ['.csv']
     },
     multiple: false
   });
 
   return (
-    <Paper 
-      elevation={3} 
-      sx={{ 
-        p: 4, 
-        textAlign: 'center',
-        border: '2px dashed',
-        borderColor: isDragActive ? 'primary.main' : 'grey.300',
-        backgroundColor: isDragActive ? 'action.hover' : 'background.paper',
-        cursor: isLoading ? 'wait' : 'pointer'
-      }}
-    >
-      <div {...getRootProps()}>
-        <input {...getInputProps()} disabled={isLoading} />
-        <CloudUpload sx={{ fontSize: 48, color: 'primary.main', mb: 2 }} />
+    <Box>
+      <Paper
+        {...getRootProps()}
+        sx={{
+          border: '2px dashed',
+          borderColor: isDragActive ? 'primary.main' : 'grey.300',
+          borderRadius: 3,
+          p: 6,
+          textAlign: 'center',
+          cursor: uploading ? 'default' : 'pointer',
+          backgroundColor: isDragActive ? 'action.hover' : 'background.paper',
+          transition: 'all 0.3s ease',
+          '&:hover': {
+            backgroundColor: uploading ? 'background.paper' : 'action.hover',
+            borderColor: 'primary.main',
+            transform: 'translateY(-2px)'
+          }
+        }}
+      >
+        <input {...getInputProps()} />
+        <CloudUpload sx={{ fontSize: 64, color: 'primary.main', mb: 2 }} />
+        <Typography variant="h6" gutterBottom sx={{ fontWeight: 'bold' }}>
+          {isDragActive ? '¡Suelta el archivo aquí!' : 'Arrastra tu archivo CSV aquí'}
+        </Typography>
+        <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
+          o haz clic para seleccionar un archivo
+        </Typography>
         
-        {isLoading ? (
-          <>
-            <CircularProgress size={40} sx={{ mb: 2 }} />
-            <Typography variant="h6" gutterBottom>
-              Procesando archivo...
+        <Button 
+          variant="contained" 
+          size="large" 
+          startIcon={<Description />}
+          disabled={uploading}
+        >
+          Seleccionar Archivo
+        </Button>
+        
+        {uploading && (
+          <Box sx={{ mt: 4 }}>
+            <LinearProgress 
+              variant="determinate" 
+              value={uploadProgress} 
+              sx={{ mb: 2, height: 8, borderRadius: 4 }}
+            />
+            <Typography variant="body2" sx={{ fontWeight: 'medium' }}>
+              {uploadStatus} {uploadProgress}%
             </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Esto puede tomar unos segundos
-            </Typography>
-          </>
-        ) : (
-          <>
-            <Typography variant="h6" gutterBottom>
-              {isDragActive ? 'Suelta el archivo aquí' : 'Arrastra tu archivo aquí'}
-            </Typography>
-            
-            <Typography variant="body2" color="text.secondary" gutterBottom>
-              o haz clic para seleccionar
-            </Typography>
-            
-            <Typography variant="caption" color="text.secondary">
-              Formatos soportados: Excel (.xlsx, .xls) y CSV
-            </Typography>
-            
-            <Button 
-              variant="contained" 
-              sx={{ mt: 2 }}
-              disabled={isLoading}
-            >
-              Seleccionar Archivo
-            </Button>
-          </>
+          </Box>
         )}
-      </div>
+      </Paper>
 
-      {error && (
-        <Alert severity="error" sx={{ mt: 2 }}>
-          {error}
+      {uploadStatus && !uploading && (
+        <Alert 
+          severity={uploadStatus.includes('Error') ? 'error' : 'success'} 
+          sx={{ mt: 3, borderRadius: 2 }}
+        >
+          {uploadStatus}
         </Alert>
       )}
-    </Paper>
+    </Box>
   );
 };
 
